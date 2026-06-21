@@ -1,0 +1,811 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
+<title>JoineryTrack</title>
+<script src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+<script src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+<script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; -webkit-tap-highlight-color: transparent; }
+  body { background: #1C1F26; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif; }
+  #root { max-width: 480px; margin: 0 auto; min-height: 100vh; }
+  input, select, textarea, button { font-family: inherit; }
+  ::-webkit-scrollbar { display: none; }
+</style>
+</head>
+<body>
+<div id="root"></div>
+
+<script type="text/babel">
+const { useState, useEffect, useRef } = React;
+
+// ── Supabase config ──────────────────────────────────────────────────────────
+const SB_URL = "https://huybirghxngdchlvoyyv.supabase.co";
+const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Imh1eWJpcmdoeG5nZGNobHZveXl2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3ODIwMzU4ODIsImV4cCI6MjA5NzYxMTg4Mn0.QBGyc7gGqpCBeLiZC__9vvrs7_Bz7VldFZdRo8Z2-Mc";
+
+const hdr = (tok) => ({
+  "Content-Type": "application/json",
+  "apikey": SB_KEY,
+  "Authorization": `Bearer ${tok || SB_KEY}`,
+  "Prefer": "return=representation"
+});
+
+async function sbFetch(path, opts = {}, tok) {
+  const res = await fetch(`${SB_URL}${path}`, {
+    ...opts,
+    headers: { ...hdr(tok), ...(opts.headers || {}) }
+  });
+  if (!res.ok) {
+    const e = await res.json().catch(() => ({}));
+    throw new Error(e.message || e.error_description || res.statusText);
+  }
+  const t = await res.text();
+  return t ? JSON.parse(t) : null;
+}
+
+const db = {
+  select: (tbl, q, tok) => sbFetch(`/rest/v1/${tbl}?${q}&order=created_at.desc`, {}, tok),
+  insert: (tbl, data, tok) => sbFetch(`/rest/v1/${tbl}`, { method: "POST", body: JSON.stringify(data) }, tok),
+  delete: (tbl, f, tok) => sbFetch(`/rest/v1/${tbl}?${f}`, { method: "DELETE" }, tok),
+};
+
+const authApi = {
+  login: (email, pw) => sbFetch("/auth/v1/token?grant_type=password", {
+    method: "POST", body: JSON.stringify({ email, password: pw })
+  }),
+  register: (email, pw, meta) => sbFetch("/auth/v1/signup", {
+    method: "POST", body: JSON.stringify({ email, password: pw, data: meta })
+  }),
+  logout: (tok) => sbFetch("/auth/v1/logout", { method: "POST" }, tok),
+};
+
+async function uploadPhoto(file, path, tok) {
+  const res = await fetch(`${SB_URL}/storage/v1/object/joinery-photos/${path}`, {
+    method: "POST",
+    headers: { "apikey": SB_KEY, "Authorization": `Bearer ${tok}`, "Content-Type": file.type, "x-upsert": "true" },
+    body: file,
+  });
+  if (!res.ok) throw new Error("Upload failed");
+  return `${SB_URL}/storage/v1/object/public/joinery-photos/${path}`;
+}
+
+// ── Constants ────────────────────────────────────────────────────────────────
+const CITIES = ["Brisbane", "Sydney"];
+const DEFAULT_TASKS = [
+  "Cupboard – Bedroom 1", "Cupboard – Bedroom 2",
+  "Walk-in Robe", "Kitchen", "Vanity – Ensuite", "Vanity – Bathroom"
+];
+const STATUSES = [
+  { key: "done",       label: "Ukończono",     color: "#22C55E", icon: "✓" },
+  { key: "problem",    label: "Problem",        color: "#E53935", icon: "!" },
+  { key: "missing",    label: "Brak materiału", color: "#F5C400", icon: "?" },
+  { key: "inprogress", label: "W trakcie",      color: "#3B82F6", icon: "→" },
+];
+const getSt = (k) => STATUSES.find(s => s.key === k) || STATUSES[0];
+const today = () => new Date().toISOString().slice(0, 10);
+const fmtT = (s) => {
+  if (!s) return "—";
+  const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sc = s % 60;
+  return h > 0 ? `${h}h ${m}m` : m > 0 ? `${m}m ${sc}s` : `${sc}s`;
+};
+
+// ── Design tokens ────────────────────────────────────────────────────────────
+const C = {
+  bg: "#1C1F26", card: "#23272F", brd: "#2D3139", mut: "#374151",
+  txt: "#F8F8F8", sub: "#9CA3AF", dim: "#6B7280",
+  y: "#F5C400", g: "#22C55E", r: "#E53935", b: "#3B82F6"
+};
+
+const inp = {
+  width: "100%", background: C.card, border: `1px solid ${C.mut}`,
+  borderRadius: 10, padding: "12px 14px", color: C.txt, fontSize: 16,
+  marginBottom: 14, boxSizing: "border-box", outline: "none"
+};
+const lbl = {
+  display: "block", color: C.sub, fontSize: 11, fontWeight: 700,
+  letterSpacing: 0.8, marginBottom: 6, marginTop: 4, textTransform: "uppercase"
+};
+const bigBtn = (bg, col = "#1C1F26") => ({
+  background: bg, color: col, border: "none", borderRadius: 10,
+  padding: "14px 0", fontWeight: 800, fontSize: 16, cursor: "pointer",
+  width: "100%", marginBottom: 8
+});
+const ghostBtn = (col) => ({
+  background: col + "18", color: col, border: `1px solid ${col}44`,
+  borderRadius: 10, padding: "10px 16px", fontWeight: 700, fontSize: 14,
+  cursor: "pointer"
+});
+const cardStyle = {
+  background: C.card, borderRadius: 12, padding: "14px 16px",
+  marginBottom: 10, border: `1px solid ${C.brd}`
+};
+const sLbl = {
+  color: C.dim, fontSize: 11, fontWeight: 700, letterSpacing: 1,
+  marginBottom: 10, textTransform: "uppercase"
+};
+
+// ── PDF generator ────────────────────────────────────────────────────────────
+function generatePDF(project, entries, profiles, date) {
+  const byW = {};
+  entries.forEach(e => {
+    const n = profiles[e.worker_id] || "?";
+    if (!byW[n]) byW[n] = [];
+    byW[n].push(e);
+  });
+  const total = entries.reduce((s, e) => s + (e.duration_seconds || 0), 0);
+  const probs = entries.filter(e => e.status === "problem" || e.status === "missing");
+  const sc = { done: "#22C55E", problem: "#E53935", missing: "#F5C400", inprogress: "#3B82F6" };
+
+  const html = `<!DOCTYPE html><html><head><meta charset="UTF-8">
+<title>Raport ${project.name} ${date}</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:Arial,sans-serif;color:#1a1a1a;padding:32px;font-size:13px}
+.hd{border-bottom:3px solid #F5C400;padding-bottom:16px;margin-bottom:24px}
+.ti{font-size:22px;font-weight:800}.ti span{color:#F5C400}
+.me{color:#666;font-size:12px;margin-top:4px}
+.st{display:flex;gap:12px;margin-bottom:24px}
+.sb{background:#f5f5f5;border-radius:8px;padding:12px 16px;text-align:center;flex:1}
+.sv{font-size:22px;font-weight:800}.sl{font-size:10px;color:#666}
+.wb{margin-bottom:20px}
+.wh{font-weight:700;font-size:14px;background:#f9f9f9;padding:8px 12px;border-radius:6px;margin-bottom:6px}
+.er{padding:8px 12px;border-left:3px solid #e5e7eb;margin-bottom:4px}
+.ba{font-size:11px;font-weight:700;padding:2px 7px;border-radius:4px}
+.et{font-weight:600;margin:0 6px}.em{color:#888;font-size:12px}
+.ec{color:#555;font-size:12px;margin-top:3px;font-style:italic}
+.ps{background:#fff5f5;border:1px solid #fca5a5;border-radius:8px;padding:16px;margin-top:20px}
+.pt{color:#E53935;font-weight:700;margin-bottom:10px}
+.pr{padding:6px 0;border-bottom:1px solid #fee2e2}.pr:last-child{border-bottom:none}
+.ft{margin-top:24px;border-top:1px solid #e5e7eb;padding-top:10px;color:#999;font-size:11px}
+@media print{body{padding:16px}}
+</style></head><body>
+<div class="hd">
+  <div class="ti"><span>Joinery</span>Track — Raport Dzienny</div>
+  <div class="me">${project.name} · ${project.city}${project.address ? " · " + project.address : ""} · ${date}</div>
+</div>
+<div class="st">
+  <div class="sb"><div class="sv">${entries.length}</div><div class="sl">Zadań</div></div>
+  <div class="sb"><div class="sv">${fmtT(total)}</div><div class="sl">Łączny czas</div></div>
+  <div class="sb"><div class="sv">${Object.keys(byW).length}</div><div class="sl">Pracowników</div></div>
+  <div class="sb"><div class="sv" style="color:#E53935">${probs.length}</div><div class="sl">Problemów</div></div>
+</div>
+${Object.entries(byW).map(([name, we]) => `
+<div class="wb">
+  <div class="wh">👷 ${name} — ${we.length} zadań / ${fmtT(we.reduce((s,e)=>s+(e.duration_seconds||0),0))}</div>
+  ${we.map(e => `
+  <div class="er">
+    <span class="ba" style="background:${sc[e.status]}22;color:${sc[e.status]};border:1px solid ${sc[e.status]}55">${getSt(e.status).label}</span>
+    <span class="et">${e.task_type}</span>
+    <span class="em">Unit ${e.unit} · Piętro ${e.level} · ${fmtT(e.duration_seconds)}</span>
+    ${e.comment ? `<div class="ec">💬 ${e.comment}</div>` : ""}
+  </div>`).join("")}
+</div>`).join("")}
+${probs.length > 0 ? `
+<div class="ps">
+  <div class="pt">⚠️ Problemy i braki materiałowe (${probs.length})</div>
+  ${probs.map(e => `
+  <div class="pr">
+    <span class="ba" style="background:${sc[e.status]}22;color:${sc[e.status]};border:1px solid ${sc[e.status]}55">${getSt(e.status).label}</span>
+    <strong> ${e.task_type}</strong> · Unit ${e.unit} · ${profiles[e.worker_id] || "?"}
+    ${e.comment ? `<div class="ec">→ ${e.comment}</div>` : ""}
+  </div>`).join("")}
+</div>` : ""}
+<div class="ft">Wygenerowano: ${new Date().toLocaleString("pl-PL")} · JoineryTrack</div>
+</body></html>`;
+
+  const w = window.open("", "_blank");
+  if (w) { w.document.write(html); w.document.close(); setTimeout(() => w.print(), 800); }
+}
+
+// ── Components ───────────────────────────────────────────────────────────────
+function Toast({ msg, color }) {
+  return (
+    <div style={{
+      position: "fixed", top: 24, left: "50%", transform: "translateX(-50%)",
+      background: color, color: "#fff", padding: "12px 24px", borderRadius: 12,
+      fontWeight: 700, zIndex: 9999, fontSize: 14, boxShadow: "0 4px 24px #0009",
+      whiteSpace: "nowrap", maxWidth: "90vw"
+    }}>{msg}</div>
+  );
+}
+
+function Hdr({ title, sub, onBack, right }) {
+  return (
+    <div style={{ background: C.bg, borderBottom: `1px solid ${C.brd}`, padding: "14px 16px", position: "sticky", top: 0, zIndex: 100 }}>
+      <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+        {onBack && (
+          <button onClick={onBack} style={{ background: "none", border: "none", color: C.y, fontSize: 24, cursor: "pointer", padding: "0 4px", lineHeight: 1 }}>←</button>
+        )}
+        <div style={{ flex: 1 }}>
+          <div style={{ fontWeight: 800, fontSize: 18, letterSpacing: -0.3 }}>
+            <span style={{ color: C.y }}>Joinery</span>Track
+            {title ? <span style={{ color: C.txt }}> · {title}</span> : null}
+          </div>
+          {sub && <div style={{ color: C.dim, fontSize: 11, marginTop: 1 }}>{sub}</div>}
+        </div>
+        {right}
+      </div>
+    </div>
+  );
+}
+
+function Stat({ label, value, color }) {
+  return (
+    <div style={{ flex: 1, background: C.bg, borderRadius: 10, padding: "10px 8px", textAlign: "center", border: `1px solid ${C.brd}` }}>
+      <div style={{ color: color || C.txt, fontWeight: 800, fontSize: 22 }}>{value}</div>
+      <div style={{ color: C.dim, fontSize: 10, marginTop: 2 }}>{label}</div>
+    </div>
+  );
+}
+
+function Badge({ status }) {
+  const s = getSt(status);
+  return (
+    <span style={{ background: s.color + "22", color: s.color, border: `1px solid ${s.color}55`, borderRadius: 6, padding: "3px 9px", fontSize: 11, fontWeight: 700, whiteSpace: "nowrap" }}>
+      {s.icon} {s.label}
+    </span>
+  );
+}
+
+function EntryCard({ entry, pics, wName, onDel, canDel }) {
+  const s = getSt(entry.status);
+  return (
+    <div style={{ ...cardStyle, borderLeft: `4px solid ${s.color}`, paddingLeft: 12 }}>
+      <div style={{ display: "flex", justifyContent: "space-between", gap: 8, alignItems: "flex-start" }}>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontWeight: 700, fontSize: 14 }}>{entry.task_type}</div>
+          <div style={{ color: C.sub, fontSize: 12, marginTop: 2 }}>Unit {entry.unit} · Piętro {entry.level} · {wName}</div>
+        </div>
+        <div style={{ display: "flex", flexDirection: "column", alignItems: "flex-end", gap: 5, flexShrink: 0 }}>
+          <Badge status={entry.status} />
+          <span style={{ color: C.y, fontSize: 11, fontWeight: 600 }}>⏱ {fmtT(entry.duration_seconds)}</span>
+        </div>
+      </div>
+      {entry.comment && (
+        <div style={{ marginTop: 8, background: C.bg, borderRadius: 8, padding: "8px 10px", color: "#D1D5DB", fontSize: 13 }}>
+          💬 {entry.comment}
+        </div>
+      )}
+      {pics && pics.length > 0 && (
+        <div style={{ display: "flex", gap: 6, marginTop: 8, flexWrap: "wrap" }}>
+          {pics.map((p, i) => (
+            <img key={i} src={p.url} alt="" onClick={() => window.open(p.url, "_blank")}
+              style={{ width: 72, height: 72, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.brd}`, cursor: "pointer" }} />
+          ))}
+        </div>
+      )}
+      <div style={{ display: "flex", justifyContent: "space-between", marginTop: 8, alignItems: "center" }}>
+        <span style={{ color: C.dim, fontSize: 10 }}>{entry.date}</span>
+        {canDel && (
+          <button onClick={() => onDel(entry.id)} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 22, lineHeight: 1, padding: "0 4px" }}>×</button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Main App ─────────────────────────────────────────────────────────────────
+function App() {
+  const [tok, setTok] = useState(() => localStorage.getItem("jt_tok") || null);
+  const [uid, setUid] = useState(() => localStorage.getItem("jt_uid") || null);
+  const [profile, setProfile] = useState(null);
+  const [loading, setLoading] = useState(true);
+  const [view, setView] = useState("home");
+  const [toast, setToast] = useState(null);
+
+  const [projects, setProjects] = useState([]);
+  const [entries, setEntries] = useState([]);
+  const [photos, setPhotos] = useState({});
+  const [profiles, setProfiles] = useState({});
+  const [taskTypes, setTaskTypes] = useState(DEFAULT_TASKS);
+
+  const [city, setCity] = useState("Brisbane");
+  const [proj, setProj] = useState(null);
+  const [repDate, setRepDate] = useState(today());
+
+  const [form, setForm] = useState({ level: "1", unit: "", taskType: "", status: "done", comment: "", photos: [] });
+  const [newProj, setNewProj] = useState({ name: "", city: "Brisbane", address: "" });
+  const [newTT, setNewTT] = useState("");
+
+  const [aMode, setAMode] = useState("login");
+  const [aForm, setAForm] = useState({ email: "", password: "", name: "", role: "worker" });
+  const [aLoading, setALoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  const [timer, setTimer] = useState({ running: false, elapsed: 0, startTs: null });
+  const timerRef = useRef(null);
+
+  const showToast = (msg, color = C.g) => {
+    setToast({ msg, color });
+    setTimeout(() => setToast(null), 3000);
+  };
+
+  useEffect(() => {
+    if (tok && uid) {
+      loadProfile(uid).finally(() => setLoading(false));
+    } else {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (tok) { loadProjects(); loadAllProfiles(); }
+  }, [tok]);
+
+  async function loadProfile(id) {
+    try {
+      const d = await db.select("profiles", `id=eq.${id}&select=*`, tok);
+      if (d && d[0]) setProfile(d[0]);
+    } catch {}
+  }
+
+  async function doAuth() {
+    setALoading(true);
+    try {
+      if (aMode === "register") {
+        await authApi.register(aForm.email, aForm.password, { full_name: aForm.name, role: aForm.role });
+        showToast("✅ Sprawdź email i potwierdź konto!");
+        setAMode("login");
+      } else {
+        const res = await authApi.login(aForm.email, aForm.password);
+        localStorage.setItem("jt_tok", res.access_token);
+        localStorage.setItem("jt_uid", res.user.id);
+        setTok(res.access_token);
+        setUid(res.user.id);
+        await loadProfile(res.user.id);
+      }
+    } catch (e) {
+      showToast(e.message || "Błąd logowania", C.r);
+    }
+    setALoading(false);
+  }
+
+  async function doLogout() {
+    try { await authApi.logout(tok); } catch {}
+    localStorage.removeItem("jt_tok");
+    localStorage.removeItem("jt_uid");
+    setTok(null); setUid(null); setProfile(null);
+    setProjects([]); setProj(null); setView("home");
+  }
+
+  async function loadProjects() {
+    try {
+      const d = await db.select("projects", "select=*&active=eq.true", tok);
+      if (d) setProjects(d);
+    } catch {}
+  }
+
+  async function loadAllProfiles() {
+    try {
+      const d = await db.select("profiles", "select=*", tok);
+      if (d) { const m = {}; d.forEach(p => { m[p.id] = p.full_name; }); setProfiles(m); }
+    } catch {}
+  }
+
+  async function openProject(p) {
+    setProj(p);
+    try {
+      const d = await db.select("entries", `project_id=eq.${p.id}&select=*`, tok);
+      if (d) {
+        setEntries(d);
+        if (d.length > 0) {
+          const ids = d.map(e => e.id).join(",");
+          const pd = await db.select("photos", `entry_id=in.(${ids})&select=*`, tok);
+          if (pd) {
+            const m = {};
+            pd.forEach(ph => { if (!m[ph.entry_id]) m[ph.entry_id] = []; m[ph.entry_id].push(ph); });
+            setPhotos(m);
+          }
+        } else { setPhotos({}); }
+      }
+      const tt = await db.select("task_types", `project_id=eq.${p.id}&select=*&order=sort_order.asc`, tok);
+      setTaskTypes(tt && tt.length > 0 ? tt.map(t => t.label) : DEFAULT_TASKS);
+    } catch {}
+    setView("project");
+  }
+
+  function startTimer() {
+    const ts = Date.now();
+    setTimer({ running: true, elapsed: 0, startTs: ts });
+    timerRef.current = setInterval(() => {
+      setTimer(t => ({ ...t, elapsed: Math.floor((Date.now() - t.startTs) / 1000) }));
+    }, 1000);
+  }
+  function stopTimer() { clearInterval(timerRef.current); setTimer(t => ({ ...t, running: false })); }
+  function resetTimer() { clearInterval(timerRef.current); setTimer({ running: false, elapsed: 0, startTs: null }); }
+
+  async function submitEntry() {
+    if (!form.unit.trim()) { showToast("Podaj numer unitu!", C.r); return; }
+    setSaving(true);
+    try {
+      const tt = form.taskType || taskTypes[0];
+      const ins = await db.insert("entries", {
+        project_id: proj.id, worker_id: uid,
+        level: form.level, unit: form.unit,
+        task_type: tt, status: form.status,
+        comment: form.comment, duration_seconds: timer.elapsed, date: today()
+      }, tok);
+      const eid = ins[0].id;
+      for (const pd of form.photos) {
+        try {
+          const blob = await fetch(pd).then(r => r.blob());
+          const file = new File([blob], "photo.jpg", { type: "image/jpeg" });
+          const path = `${uid}/${eid}/${Date.now()}.jpg`;
+          const url = await uploadPhoto(file, path, tok);
+          await db.insert("photos", { entry_id: eid, storage_path: path, url, uploaded_by: uid }, tok);
+        } catch {}
+      }
+      resetTimer();
+      setForm({ level: form.level, unit: "", taskType: tt, status: "done", comment: "", photos: [] });
+      await openProject(proj);
+      showToast("✅ Zadanie zapisane!");
+    } catch (e) { showToast("Błąd: " + e.message, C.r); }
+    setSaving(false);
+  }
+
+  async function delEntry(id) {
+    await db.delete("entries", `id=eq.${id}`, tok);
+    setEntries(e => e.filter(x => x.id !== id));
+    showToast("Usunięto", C.dim);
+  }
+
+  async function addProject() {
+    if (!newProj.name.trim()) { showToast("Podaj nazwę!", C.r); return; }
+    try {
+      const res = await db.insert("projects", { ...newProj, created_by: uid }, tok);
+      setProjects(p => [res[0], ...p]);
+      setNewProj({ name: "", city, address: "" });
+      showToast("✅ Projekt dodany!");
+      setView("home");
+    } catch (e) { showToast(e.message, C.r); }
+  }
+
+  async function addTT() {
+    if (!newTT.trim()) return;
+    try {
+      await db.insert("task_types", { label: newTT.trim(), project_id: proj.id, sort_order: taskTypes.length }, tok);
+      setTaskTypes(t => [...t, newTT.trim()]);
+      setNewTT("");
+      showToast("✅ Typ dodany!");
+    } catch (e) { showToast(e.message, C.r); }
+  }
+
+  function onPhotos(e) {
+    Array.from(e.target.files).forEach(f => {
+      const r = new FileReader();
+      r.onload = ev => setForm(x => ({ ...x, photos: [...x.photos, ev.target.result] }));
+      r.readAsDataURL(f);
+    });
+  }
+
+  const isManager = profile?.role === "manager" || profile?.role === "admin";
+  const root = { background: C.bg, minHeight: "100vh", color: C.txt };
+  const body = { padding: "20px 16px 80px" };
+
+  // LOADING
+  if (loading) return (
+    <div style={{ ...root, display: "flex", alignItems: "center", justifyContent: "center", height: "100vh" }}>
+      <div style={{ color: C.y, fontSize: 20, fontWeight: 700 }}>Ładowanie…</div>
+    </div>
+  );
+
+  // AUTH
+  if (!tok) return (
+    <div style={root}>
+      {toast && <Toast msg={toast.msg} color={toast.color} />}
+      <div style={{ padding: "56px 24px 24px" }}>
+        <div style={{ fontWeight: 900, fontSize: 32, marginBottom: 4 }}>
+          <span style={{ color: C.y }}>Joinery</span>Track
+        </div>
+        <div style={{ color: C.dim, fontSize: 14, marginBottom: 40 }}>Brisbane & Sydney — Site Tracker</div>
+        <div style={{ display: "flex", gap: 8, marginBottom: 28 }}>
+          {["login", "register"].map(m => (
+            <button key={m} onClick={() => setAMode(m)} style={{ ...ghostBtn(m === aMode ? C.y : C.dim), flex: 1 }}>
+              {m === "login" ? "Zaloguj się" : "Nowe konto"}
+            </button>
+          ))}
+        </div>
+        {aMode === "register" && <>
+          <label style={lbl}>Imię i nazwisko</label>
+          <input style={inp} placeholder="np. Kacper Bielaska" value={aForm.name} onChange={e => setAForm(f => ({ ...f, name: e.target.value }))} />
+          <label style={lbl}>Rola</label>
+          <select style={inp} value={aForm.role} onChange={e => setAForm(f => ({ ...f, role: e.target.value }))}>
+            <option value="worker">Pracownik (joiner)</option>
+            <option value="manager">Manager</option>
+            <option value="admin">Admin</option>
+          </select>
+        </>}
+        <label style={lbl}>Email</label>
+        <input style={inp} type="email" placeholder="email@example.com" value={aForm.email}
+          onChange={e => setAForm(f => ({ ...f, email: e.target.value }))} />
+        <label style={lbl}>Hasło</label>
+        <input style={inp} type="password" placeholder="min. 6 znaków" value={aForm.password}
+          onChange={e => setAForm(f => ({ ...f, password: e.target.value }))}
+          onKeyDown={e => e.key === "Enter" && doAuth()} />
+        <button style={{ ...bigBtn(C.y), marginTop: 8, opacity: aLoading ? 0.7 : 1 }} onClick={doAuth} disabled={aLoading}>
+          {aLoading ? "…" : aMode === "login" ? "Zaloguj →" : "Utwórz konto →"}
+        </button>
+      </div>
+    </div>
+  );
+
+  // HOME
+  if (view === "home") {
+    const cp = projects.filter(p => p.city === city);
+    return (
+      <div style={root}>
+        {toast && <Toast msg={toast.msg} color={toast.color} />}
+        <Hdr right={
+          <button onClick={doLogout} style={{ background: "none", border: "none", color: C.dim, cursor: "pointer", fontSize: 13, padding: "4px 8px" }}>
+            Wyloguj
+          </button>
+        } />
+        <div style={body}>
+          <div style={{ marginBottom: 24 }}>
+            <div style={{ color: C.sub, fontSize: 12 }}>Zalogowany jako</div>
+            <div style={{ fontWeight: 700, fontSize: 17 }}>
+              {profile?.full_name}
+              <span style={{ color: C.dim, fontSize: 12, fontWeight: 400 }}> ({profile?.role})</span>
+            </div>
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 28 }}>
+            {CITIES.map(c => (
+              <button key={c} onClick={() => setCity(c)} style={{
+                flex: 1, padding: "14px 0", borderRadius: 10, cursor: "pointer", fontWeight: 700, fontSize: 16,
+                border: `2px solid ${city === c ? C.y : C.mut}`,
+                background: city === c ? C.y + "18" : C.card,
+                color: city === c ? C.y : C.sub
+              }}>{c}</button>
+            ))}
+          </div>
+          <div style={sLbl}>Projekty — {city}</div>
+          {cp.length === 0 && <div style={{ color: C.mut, textAlign: "center", padding: "40px 0", fontSize: 15 }}>Brak projektów w {city}.</div>}
+          {cp.map(p => (
+            <div key={p.id} style={{ ...cardStyle, cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center" }}
+              onClick={() => openProject(p)}>
+              <div>
+                <div style={{ fontWeight: 700, fontSize: 16 }}>{p.name}</div>
+                {p.address && <div style={{ color: C.sub, fontSize: 12, marginTop: 3 }}>{p.address}</div>}
+              </div>
+              <div style={{ color: C.y, fontSize: 22, fontWeight: 800 }}>→</div>
+            </div>
+          ))}
+          {isManager && (
+            <button style={{ ...bigBtn(C.y), marginTop: 12 }}
+              onClick={() => { setNewProj(x => ({ ...x, city })); setView("newproject"); }}>
+              + Nowy projekt
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  // NEW PROJECT
+  if (view === "newproject") return (
+    <div style={root}>
+      {toast && <Toast msg={toast.msg} color={toast.color} />}
+      <Hdr title="Nowy projekt" onBack={() => setView("home")} />
+      <div style={body}>
+        <label style={lbl}>Miasto</label>
+        <div style={{ display: "flex", gap: 8, marginBottom: 18 }}>
+          {CITIES.map(c => (
+            <button key={c} onClick={() => setNewProj(p => ({ ...p, city: c }))} style={{
+              flex: 1, padding: "12px 0", borderRadius: 10, cursor: "pointer", fontWeight: 700,
+              border: `2px solid ${newProj.city === c ? C.y : C.mut}`,
+              background: newProj.city === c ? C.y + "18" : C.card,
+              color: newProj.city === c ? C.y : C.sub
+            }}>{c}</button>
+          ))}
+        </div>
+        <label style={lbl}>Nazwa projektu</label>
+        <input style={inp} placeholder="np. OSJ Multi-Unit" value={newProj.name}
+          onChange={e => setNewProj(p => ({ ...p, name: e.target.value }))} />
+        <label style={lbl}>Adres budowy</label>
+        <input style={inp} placeholder="np. 11 Ferry Rd, West End" value={newProj.address}
+          onChange={e => setNewProj(p => ({ ...p, address: e.target.value }))} />
+        <button style={bigBtn(C.y)} onClick={addProject}>Dodaj projekt →</button>
+      </div>
+    </div>
+  );
+
+  // PROJECT
+  if (view === "project") {
+    const todE = entries.filter(e => e.project_id === proj.id && e.date === today());
+    const oldE = entries.filter(e => e.project_id === proj.id && e.date !== today());
+    const prc = todE.filter(e => e.status === "problem" || e.status === "missing").length;
+    return (
+      <div style={root}>
+        {toast && <Toast msg={toast.msg} color={toast.color} />}
+        <Hdr title={proj.name} sub={`${proj.city}${proj.address ? " · " + proj.address : ""}`} onBack={() => setView("home")} />
+        <div style={body}>
+          <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+            <Stat label="Dziś" value={todE.length} />
+            <Stat label="Problemy" value={prc} color={prc > 0 ? C.r : C.txt} />
+            <Stat label="Total" value={entries.filter(e => e.project_id === proj.id).length} color={C.sub} />
+          </div>
+          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
+            <button style={{ ...bigBtn(C.y), flex: 2, marginBottom: 0 }} onClick={() => {
+              setForm({ level: "1", unit: "", taskType: taskTypes[0], status: "done", comment: "", photos: [] });
+              resetTimer(); setView("add");
+            }}>+ Dodaj zadanie</button>
+            <button style={{ ...ghostBtn(C.y), flex: 1 }} onClick={() => setView("report")}>📋 Raport</button>
+          </div>
+          {isManager && (
+            <button style={{ ...ghostBtn(C.sub), width: "100%", marginBottom: 16 }} onClick={() => setView("settings")}>
+              ⚙ Typy zadań
+            </button>
+          )}
+          <div style={sLbl}>Dziś — {todE.length} zadań</div>
+          {todE.length === 0 && <div style={{ color: C.mut, textAlign: "center", padding: "32px 0", fontSize: 14 }}>Brak wpisów na dziś.</div>}
+          {todE.map(e => <EntryCard key={e.id} entry={e} pics={photos[e.id]} wName={profiles[e.worker_id] || "?"} onDel={delEntry} canDel={e.worker_id === uid || profile?.role === "admin"} />)}
+          {oldE.length > 0 && <>
+            <div style={{ ...sLbl, marginTop: 24 }}>Poprzednie wpisy</div>
+            {oldE.map(e => <EntryCard key={e.id} entry={e} pics={photos[e.id]} wName={profiles[e.worker_id] || "?"} onDel={delEntry} canDel={e.worker_id === uid || profile?.role === "admin"} />)}
+          </>}
+        </div>
+      </div>
+    );
+  }
+
+  // ADD
+  if (view === "add") return (
+    <div style={root}>
+      {toast && <Toast msg={toast.msg} color={toast.color} />}
+      <Hdr title="Nowe zadanie" sub={proj?.name} onBack={() => setView("project")} />
+      <div style={body}>
+        <label style={lbl}>Piętro / Poziom</label>
+        <input style={inp} placeholder="np. 1, 2, G" value={form.level}
+          onChange={e => setForm(f => ({ ...f, level: e.target.value }))} />
+        <label style={lbl}>Numer Unitu</label>
+        <input style={inp} placeholder="np. 101, 204B" value={form.unit}
+          onChange={e => setForm(f => ({ ...f, unit: e.target.value }))} />
+        <label style={lbl}>Typ zadania</label>
+        <select style={inp} value={form.taskType || taskTypes[0]}
+          onChange={e => setForm(f => ({ ...f, taskType: e.target.value }))}>
+          {taskTypes.map(t => <option key={t}>{t}</option>)}
+        </select>
+        <label style={lbl}>Czas wykonania</label>
+        <div style={{ background: C.card, borderRadius: 12, padding: 18, marginBottom: 14, textAlign: "center" }}>
+          <div style={{ color: C.y, fontWeight: 800, fontSize: 42, letterSpacing: 4, marginBottom: 14, fontVariantNumeric: "tabular-nums" }}>
+            {fmtT(timer.elapsed)}
+          </div>
+          <div style={{ display: "flex", gap: 10, justifyContent: "center" }}>
+            {!timer.running
+              ? <button style={ghostBtn(C.g)} onClick={startTimer}>▶ Start</button>
+              : <button style={ghostBtn(C.r)} onClick={stopTimer}>⏸ Stop</button>
+            }
+            <button style={ghostBtn(C.dim)} onClick={resetTimer}>↺ Reset</button>
+          </div>
+        </div>
+        <label style={lbl}>Status</label>
+        <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+          {STATUSES.map(s => (
+            <button key={s.key} onClick={() => setForm(f => ({ ...f, status: s.key }))} style={{
+              padding: "9px 14px", borderRadius: 8, cursor: "pointer", fontWeight: 700, fontSize: 13,
+              border: `2px solid ${form.status === s.key ? s.color : C.mut}`,
+              background: form.status === s.key ? s.color + "22" : C.card,
+              color: form.status === s.key ? s.color : C.sub
+            }}>{s.icon} {s.label}</button>
+          ))}
+        </div>
+        <label style={lbl}>Komentarz / Problem</label>
+        <textarea style={{ ...inp, minHeight: 90, resize: "vertical" }}
+          placeholder="Co nie pasowało, czego brakowało, uwagi…"
+          value={form.comment} onChange={e => setForm(f => ({ ...f, comment: e.target.value }))} />
+        <label style={lbl}>Zdjęcia</label>
+        <label style={{ display: "block", background: C.card, border: `2px dashed ${C.mut}`, borderRadius: 10, padding: 16, color: C.sub, fontWeight: 600, fontSize: 15, cursor: "pointer", textAlign: "center", marginBottom: 12 }}>
+          📷 Dodaj zdjęcia z aparatu
+          <input type="file" accept="image/*" multiple capture="environment" style={{ display: "none" }} onChange={onPhotos} />
+        </label>
+        {form.photos.length > 0 && (
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap", marginBottom: 16 }}>
+            {form.photos.map((src, i) => (
+              <div key={i} style={{ position: "relative" }}>
+                <img src={src} alt="" style={{ width: 84, height: 84, objectFit: "cover", borderRadius: 8, border: `1px solid ${C.brd}` }} />
+                <button onClick={() => setForm(f => ({ ...f, photos: f.photos.filter((_, j) => j !== i) }))}
+                  style={{ position: "absolute", top: -8, right: -8, background: C.r, color: "#fff", border: "none", borderRadius: "50%", width: 22, height: 22, cursor: "pointer", fontSize: 14, lineHeight: "22px", textAlign: "center" }}>×</button>
+              </div>
+            ))}
+          </div>
+        )}
+        <button style={{ ...bigBtn(C.y), opacity: saving ? 0.6 : 1 }} onClick={submitEntry} disabled={saving}>
+          {saving ? "Zapisywanie…" : "Zapisz zadanie ✓"}
+        </button>
+      </div>
+    </div>
+  );
+
+  // SETTINGS
+  if (view === "settings") return (
+    <div style={root}>
+      {toast && <Toast msg={toast.msg} color={toast.color} />}
+      <Hdr title="Typy zadań" sub={proj?.name} onBack={() => setView("project")} />
+      <div style={body}>
+        <div style={sLbl}>Aktualna lista</div>
+        {taskTypes.map((t, i) => (
+          <div key={i} style={cardStyle}><span style={{ fontSize: 14 }}>{t}</span></div>
+        ))}
+        <div style={{ marginTop: 24 }}>
+          <label style={lbl}>Dodaj nowy typ zadania</label>
+          <input style={inp} placeholder="np. Laundry Cupboard" value={newTT}
+            onChange={e => setNewTT(e.target.value)}
+            onKeyDown={e => e.key === "Enter" && addTT()} />
+          <button style={bigBtn(C.y)} onClick={addTT}>+ Dodaj typ</button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // REPORT
+  if (view === "report") {
+    const rE = entries.filter(e => e.project_id === proj.id && e.date === repDate);
+    const total = rE.reduce((s, e) => s + (e.duration_seconds || 0), 0);
+    const probs = rE.filter(e => e.status === "problem" || e.status === "missing");
+    const byW = {};
+    rE.forEach(e => { const n = profiles[e.worker_id] || "?"; if (!byW[n]) byW[n] = []; byW[n].push(e); });
+    return (
+      <div style={root}>
+        {toast && <Toast msg={toast.msg} color={toast.color} />}
+        <Hdr title="Raport" sub={proj?.name} onBack={() => setView("project")} />
+        <div style={body}>
+          <label style={lbl}>Data raportu</label>
+          <input type="date" style={inp} value={repDate} onChange={e => setRepDate(e.target.value)} />
+          {rE.length === 0
+            ? <div style={{ color: C.mut, textAlign: "center", padding: "40px 0", fontSize: 15 }}>Brak wpisów dla {repDate}.</div>
+            : <>
+              <div style={{ display: "flex", gap: 8, marginBottom: 20 }}>
+                <Stat label="Zadań" value={rE.length} />
+                <Stat label="Czas" value={fmtT(total)} color={C.y} />
+                <Stat label="Problemy" value={probs.length} color={probs.length > 0 ? C.r : C.txt} />
+              </div>
+              {Object.entries(byW).map(([name, we]) => (
+                <div key={name} style={{ marginBottom: 18 }}>
+                  <div style={sLbl}>👷 {name}</div>
+                  {we.map(e => (
+                    <div key={e.id} style={{ ...cardStyle, borderLeft: `3px solid ${getSt(e.status).color}`, paddingLeft: 12 }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", gap: 8 }}>
+                        <span style={{ fontWeight: 600, fontSize: 14 }}>{e.task_type}</span>
+                        <Badge status={e.status} />
+                      </div>
+                      <div style={{ color: C.sub, fontSize: 12, marginTop: 4 }}>
+                        Unit {e.unit} · Piętro {e.level} · ⏱ {fmtT(e.duration_seconds)}
+                      </div>
+                      {e.comment && <div style={{ color: "#D1D5DB", fontSize: 13, marginTop: 6 }}>💬 {e.comment}</div>}
+                    </div>
+                  ))}
+                </div>
+              ))}
+              {probs.length > 0 && (
+                <div style={{ background: C.r + "11", border: `1px solid ${C.r}44`, borderRadius: 12, padding: 16, marginBottom: 16 }}>
+                  <div style={{ color: C.r, fontWeight: 700, marginBottom: 10 }}>⚠️ Problemy / Braki — {probs.length}</div>
+                  {probs.map(e => (
+                    <div key={e.id} style={{ marginBottom: 10 }}>
+                      <span style={{ fontWeight: 600 }}>{e.task_type}</span>
+                      <span style={{ color: C.sub, fontSize: 12 }}> · Unit {e.unit} · {profiles[e.worker_id] || "?"}</span>
+                      {e.comment && <div style={{ color: "#D1D5DB", fontSize: 13, marginTop: 2 }}>→ {e.comment}</div>}
+                    </div>
+                  ))}
+                </div>
+              )}
+              <button style={bigBtn(C.y)} onClick={() => generatePDF(proj, rE, profiles, repDate)}>
+                🖨 Drukuj / Zapisz PDF
+              </button>
+            </>
+          }
+        </div>
+      </div>
+    );
+  }
+
+  return null;
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+</script>
+</body>
+</html>
